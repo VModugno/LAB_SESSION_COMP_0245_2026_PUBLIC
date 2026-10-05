@@ -71,3 +71,69 @@ python induction_simulator.py
 ## Stopping
 
 Both scripts loop forever by design. Press **`q` inside the pybullet window** to exit cleanly (Ctrl+C in the terminal can leave the GUI process alive).
+
+---
+
+# Week 1–2 — Dynamic Regression
+
+Script: `dynamic_regression.py` — excites the Panda arm with a sinusoidal joint reference under feedback-linearization control, records joint states/torques, and is the starting point for the dynamics-regression exercise (regressor stacking, least-squares parameter identification).
+
+## Prerequisites (once per machine)
+
+1. Clone RoboEnv with submodules and install its pixi environment:
+
+   ```bash
+   git clone --recurse-submodules https://github.com/VModugno/RoboEnv.git
+   cd RoboEnv && pixi install
+   pixi run smoke-test   # → prints "simulation_and_control OK"
+   ```
+
+## One-time setup for this folder
+
+`configs/` and `models/` are intentionally not part of the lab repo. Copy or link them from your RoboEnv checkout:
+
+**Windows (PowerShell):**
+
+```powershell
+$robo = "C:\path\to\RoboEnv"
+
+Copy-Item "$robo\configs\pandaconfig.json" .\configs\ -Force
+New-Item -ItemType Junction -Path .\models -Target "$robo\models"
+```
+
+**macOS / Linux:**
+
+```bash
+robo=/path/to/RoboEnv
+mkdir -p configs && cp "$robo"/configs/pandaconfig.json configs/
+ln -s "$robo"/models models
+```
+
+## Run
+
+From the **RoboEnv root**:
+
+```bash
+pixi run python "<full path>/week1/dynamic_regression.py"
+```
+
+or activate once and work from this folder:
+
+```bash
+cd RoboEnv && pixi shell
+cd "<full path>/week1"
+python dynamic_regression.py
+```
+
+## What to expect
+
+- The pybullet GUI opens and the Panda arm tracks the sinusoidal reference for 10 seconds while the script collects `q`, `qd`, `qdd`, and measured torques.
+- Progress prints every step (`Current time in seconds: ...`), ending at `10.00`.
+
+## Known quirk
+
+After the 10-second data collection completes, the script crashes with `NameError: name 's' is not defined` — there is a **stray `s` character on line 91**, right in the TODO section you are about to implement. Delete that line before running; the data collection part is unaffected.
+
+## Stopping
+
+The script terminates by itself at `max_time = 10` s. The pybullet window closes with the process. The TODOs at the bottom are yours to implement.
