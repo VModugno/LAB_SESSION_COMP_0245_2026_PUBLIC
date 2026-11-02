@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import os
+from dataclasses import dataclass
 
 # Headless mode and step cap for CI / direct runs
 headless = os.environ.get("ROBOENV_HEADLESS", "").strip().lower() in ("1", "true", "yes")
@@ -28,7 +29,47 @@ BASE_NAV_TIMEOUT = 25.0
 ARM_REACH_LIMIT = 0.85
 STANDOFF_Z_POINTS = [0.1, 0.5, 1.1, 1.25]
 STANDOFF_POINTS = [0.80, 0.65, 0.65, 0.35]
-REACH_TOLERANCE = 0.01
+REACH_TOLERANCE = 0.02
+
+
+# ==============================================================================
+# TORQUE NOISE (DART-style data collection)
+# ==============================================================================
+@dataclass
+class TorqueNoiseParams:
+    """Random perturbations added to the arm torque command during data collection.
+
+    The sim executes the perturbed torque but the clean expert torque is logged, so a policy
+    trained on the data sees the expert recovering from pushes (braking near the target)
+    without learning the noise itself.
+    """
+    std: float = 2.0               # N*m, per-joint std of an active noise segment
+    active_prob: float = 0.5       # chance a segment is noisy; quiet segments let the arm settle
+    kick_prob: float = 0.1         # chance an active segment is a larger kick
+    kick_scale: float = 3.0        # kick std = std * kick_scale
+    min_duration: float = 0.05     # s, the noise value is held constant for one segment
+    max_duration: float = 0.3      # s
+
+
+class TorqueNoise:
+    """Piecewise-constant random torque: a new value is drawn at the start of each segment."""
+
+    def __init__(self, params, rng):
+        self.params = params
+        self.rng = rng
+        self.value = np.zeros(7)
+        self.segment_end = 0.0
+
+    def sample(self, current_time):
+        if current_time >= self.segment_end:
+            p_ = self.params
+            self.segment_end = current_time + self.rng.uniform(p_.min_duration, p_.max_duration)
+            if self.rng.random() < p_.active_prob:
+                scale = p_.std * (p_.kick_scale if self.rng.random() < p_.kick_prob else 1.0)
+                self.value = self.rng.normal(0.0, scale, 7)
+            else:
+                self.value = np.zeros(7)
+        return self.value
 
 
 def setup_simulation():
@@ -111,10 +152,58 @@ def compute_base_goal(target_ee_pos):
     return base_goal_pos, target_bearing
 
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TorqueNoiseParams:
+    """Configuration for DART-style torque perturbation during data collection."""
+    std: float = 1.0              # base noise std (N·m per joint)
+    active_prob: float = 0.5      # probability each segment is noisy vs quiet
+    kick_prob: float = 0.1        # probability an active segment is a larger kick
+    kick_scale: float = 3.0       # kick std = kick_scale * std
+    segment_steps: int = 50       # steps per noise segment
+
+
+class TorqueNoise:
+    """Generates per-step torque perturbation vectors for 7 arm joints."""
+
+    def __init__(self, params: TorqueNoiseParams, rng=None):
+        self.params = params
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self._steps_in_segment = 0
+        self._current_noise = np.zeros(7)
+        self._active = False
+        self._new_segment()
+
+    def _new_segment(self):
+        self._steps_in_segment = 0
+        self._active = self.rng.random() < self.params.active_prob
+        if self._active:
+            scale = self.params.std
+            if self.rng.random() < self.params.kick_prob:
+                scale *= self.params.kick_scale
+            self._current_noise = self.rng.normal(0, scale, size=7)
+        else:
+            self._current_noise = np.zeros(7)
+
+    def sample(self):
+        """Return the noise vector for this step, advancing the segment clock."""
+        self._steps_in_segment += 1
+        if self._steps_in_segment >= self.params.segment_steps:
+            self._new_segment()
+        return self._current_noise
+
+
 def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
                         init_joint_angles, target_finger_angles,
-                        lower_limits, upper_limits, target_ee_pos=None):
+                        lower_limits, upper_limits, target_ee_pos=None,
+                        torque_noise=None, hold_time=0.0):
     """Run the main control loop: base navigation then arm reaching.
+
+    torque_noise: optional TorqueNoise. While the arm is reaching, its value is added to the
+        torque sent to the sim; the logged torque_arm stays the clean expert command.
+    hold_time: s to keep running after the target is first reached (0 = stop on reach).
 
     Returns a dict of logged data arrays.
     """
@@ -137,6 +226,7 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
 
     stop_criteria = StopCriteria(reach_tolerance=REACH_TOLERANCE, max_steps=max_steps)
     cmd = MotorCommands()
+    reach_time = None
 
     # Data logs
     time_all, ee_pos_all, ee_error_all = [], [], []
@@ -144,6 +234,8 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
     q_d_all, qd_d_all = [], []
     torque_arm_all, wheel_cmds_all, base_bearing_all, target_ee_pos_all = [], [], [], []
     base_lin_vel_all, base_ang_vel_all = [], []
+    tau_gravity_all = []
+    torque_applied_all = []
 
     while True:
         # ---- Sense ----
@@ -164,6 +256,10 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
         ee_error = target_ee_pos - ee_pos
         ee_dist_error = np.linalg.norm(ee_error)
 
+        # ---- Gravity compensation (for data logging) ----
+        tau_g_full = pin.computeGeneralizedGravity(dyn_model.pin_model, dyn_model.pin_data, q_pin)
+        tau_gravity_arm = tau_g_full[6:13].copy()  # 7 arm joints
+
         # ---- Base control ----
         wheel_cmds = base_controller(
             base_state, base_pos, base_bearing, base_goal_pos, base_goal_bearing, current_time, base_params,
@@ -177,9 +273,15 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
             reach_active=base_navigation_done,
         )
 
+        # ---- Torque noise (executed only, never logged as the label) ----
+        torque_applied = torque_arm
+        if torque_noise is not None and base_navigation_done:
+            torque_applied = np.clip(torque_arm + torque_noise.sample(current_time),
+                                     -arm_params.max_torque, arm_params.max_torque)
+
         # ---- Send commands ----
         torque_fingers = np.zeros(6)
-        cmd_all = np.concatenate((wheel_cmds, torque_arm, torque_fingers))
+        cmd_all = np.concatenate((wheel_cmds, torque_applied, torque_fingers))
         control_modes = ["velocity"] * 4 + ["torque"] * 7 + ["torque"] * 6
         cmd.SetControlCmd(cmd_all, control_modes)
         sim.Step(cmd, "torque")
@@ -197,8 +299,27 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
 
         # ---- Stop criteria ----
         stop_message = check_stop(stop_criteria, current_time, time_step, ee_dist_error, base_navigation_done)
+        if hold_time > 0:
+            if reach_time is None and stop_message and stop_message.startswith("Target reached"):
+                reach_time = current_time
+                print(f"{stop_message} Holding for {hold_time:.1f}s more...")
+            if reach_time is not None:
+                # After the first reach only the hold window and the step cap end the run
+                if current_time - reach_time >= hold_time:
+                    stop_message = (f"Hold window over at t={current_time:.2f}s "
+                                    f"(EE error {ee_dist_error:.4f} m)")
+                elif not (stop_message or "").startswith("Reached step cap"):
+                    stop_message = None
         if stop_message:
-            print(stop_message)
+            if hold_time > 0 and "reached" in stop_message.lower() and not holding:
+                holding = True
+                hold_start = current_time
+                print(f"{stop_message}  (holding for {hold_time:.1f}s)")
+            elif not holding:
+                print(stop_message)
+                break
+        if holding and current_time - hold_start >= hold_time:
+            print(f"Hold complete at t={current_time:.2f}s")
             break
 
         # ---- Log data ----
@@ -211,11 +332,13 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
         q_d_all.append(np.concatenate((q_mes[:4], q_des_arm, target_finger_angles)))
         qd_d_all.append(np.concatenate((wheel_cmds, qd_des_arm, np.zeros(6))))
         torque_arm_all.append(torque_arm)
+        torque_applied_all.append(torque_applied)
         wheel_cmds_all.append(wheel_cmds)
         base_bearing_all.append(base_bearing)
         target_ee_pos_all.append(target_ee_pos.copy())
         base_lin_vel_all.append(base_lin_vel)
         base_ang_vel_all.append(base_ang_vel)
+        tau_gravity_all.append(tau_gravity_arm)
 
         if not headless:
             time.sleep(0.001)
@@ -236,11 +359,14 @@ def run_simulation_loop(sim, dyn_model, ee_frame_id, shoulder_frame_id,
         "q_d": q_d_all,
         "qd_d": qd_d_all,
         "torque_arm": np.array(torque_arm_all),
+        "torque_applied": np.array(torque_applied_all),
+        "reach_time": reach_time,
         "wheel_cmds": np.array(wheel_cmds_all),
         "base_bearing": np.array(base_bearing_all),
         "target_ee_pos": np.array(target_ee_pos_all),
         "base_lin_vel": np.array(base_lin_vel_all),
         "base_ang_vel": np.array(base_ang_vel_all),
+        "tau_gravity": np.array(tau_gravity_all),
         "final_base_pos": base_pos,
         "final_ee_pos": ee_pos,
         "final_q_mes": q_mes,

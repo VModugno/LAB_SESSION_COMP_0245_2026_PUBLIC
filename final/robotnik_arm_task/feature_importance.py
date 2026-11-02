@@ -18,8 +18,8 @@ import torch.nn as nn
 from run_policy import load_policy, build_mlp
 from train_regressor import split_by_trajectory
 
-# Feature names matching collect_data.py INPUT_COLS
-INPUT_NAMES = (
+# Feature names for known dataset layouts
+NAMES_44 = (
     ["base_pos_x", "base_pos_y", "base_bearing"]
     + ["base_lin_vel_x", "base_lin_vel_y", "base_lin_vel_z"]
     + ["base_ang_vel_x", "base_ang_vel_y", "base_ang_vel_z"]
@@ -29,21 +29,68 @@ INPUT_NAMES = (
     + [f"qd_arm_{i}" for i in range(1, 8)]
     + ["ee_pos_x", "ee_pos_y", "ee_pos_z"]
     + ["target_x", "target_y", "target_z"]
+    + [f"tau_gravity_{i}" for i in range(1, 8)]
 )
 
-# Group related features for a higher-level summary
-FEATURE_GROUPS = {
+GROUPS_44 = {
     "base_pos":     [0, 1],
     "base_bearing": [2],
     "base_lin_vel": [3, 4, 5],
     "base_ang_vel": [6, 7, 8],
-    "q_base":       [9, 10, 11, 12],
-    "qd_base":      [13, 14, 15, 16],
-    "q_arm":        [17, 18, 19, 20, 21, 22, 23],
-    "qd_arm":       [24, 25, 26, 27, 28, 29, 30],
+    "q_base":       list(range(9, 13)),
+    "qd_base":      list(range(13, 17)),
+    "q_arm":        list(range(17, 24)),
+    "qd_arm":       list(range(24, 31)),
     "ee_pos":       [31, 32, 33],
     "target":       [34, 35, 36],
+    "tau_gravity":  list(range(37, 44)),
 }
+
+NAMES_14 = (
+    ["base_pos_x", "base_pos_y", "base_bearing"]
+    + ["base_lin_vel_x", "base_lin_vel_y", "base_lin_vel_z"]
+    + ["base_ang_vel_x", "base_ang_vel_y", "base_ang_vel_z"]
+    + ["target_x", "target_y", "target_z"]
+    + ["dist_to_target", "heading_error"]
+)
+
+GROUPS_14 = {
+    "base_pos":     [0, 1],
+    "base_bearing": [2],
+    "base_lin_vel": [3, 4, 5],
+    "base_ang_vel": [6, 7, 8],
+    "target":       [9, 10, 11],
+    "goal_rel":     [12, 13],
+}
+
+NAMES_27 = (
+    [f"q_arm_{i}" for i in range(1, 8)]
+    + [f"qd_arm_{i}" for i in range(1, 8)]
+    + ["ee_pos_x", "ee_pos_y", "ee_pos_z"]
+    + ["target_x", "target_y", "target_z"]
+    + [f"tau_gravity_{i}" for i in range(1, 8)]
+)
+
+GROUPS_27 = {
+    "q_arm":        list(range(0, 7)),
+    "qd_arm":       list(range(7, 14)),
+    "ee_pos":       [14, 15, 16],
+    "target":       [17, 18, 19],
+    "tau_gravity":  list(range(20, 27)),
+}
+
+
+def get_names_and_groups(n_features):
+    """Return (names, groups) matching the dataset dimension."""
+    if n_features == 44:
+        return NAMES_44, GROUPS_44
+    elif n_features == 14:
+        return NAMES_14, GROUPS_14
+    elif n_features == 27:
+        return NAMES_27, GROUPS_27
+    else:
+        # Fallback: generic names, no groups
+        return [f"feat_{i}" for i in range(n_features)], None
 
 
 def _eval_single_feature(args_tuple):
@@ -53,7 +100,7 @@ def _eval_single_feature(args_tuple):
     """
     (feat_idx, X_norm, y_val, checkpoint_path, n_repeats, seed) = args_tuple
     # Each worker loads its own model (avoids pickling torch model / sharing GPU state)
-    model, _, _ = load_policy(checkpoint_path, device="cpu")
+    model, _, _, _, _, _ = load_policy(checkpoint_path, device="cpu")
     model.eval()
     X_t_base = torch.tensor(X_norm, dtype=torch.float32)
     y_t = torch.tensor(y_val, dtype=torch.float32)
@@ -77,10 +124,11 @@ def permutation_importance(model, X_val, y_val, mean, std, device,
                            n_repeats=5, seed=42, num_workers=0, checkpoint_path=None):
     """Compute permutation importance for each feature.
 
-    Returns array of shape (37,) — increase in MSE when each feature is shuffled.
+    Returns array of shape (n_features,) — increase in MSE when each feature is shuffled.
     """
     X_norm = (X_val - mean) / std
     n_features = X_val.shape[1]
+    feat_names, _ = get_names_and_groups(n_features)
 
     if num_workers > 0 and checkpoint_path:
         # Parallel: each worker handles one feature
@@ -97,7 +145,7 @@ def permutation_importance(model, X_val, y_val, mean, std, device,
                 if baseline_mse is None:
                     baseline_mse = bm
                 done += 1
-                print(f"  [{done}/{n_features}] {INPUT_NAMES[feat_idx]}: {imp:.6f}")
+                print(f"  [{done}/{n_features}] {feat_names[feat_idx]}: {imp:.6f}")
         return importance, baseline_mse
     else:
         # Sequential fallback
@@ -120,7 +168,7 @@ def permutation_importance(model, X_val, y_val, mean, std, device,
                     shuffled_mse = nn.functional.mse_loss(model(X_s), y_t).item()
                 mse_increases.append(shuffled_mse - baseline_mse)
             importance[feat_idx] = np.mean(mse_increases)
-            print(f"  [{feat_idx+1}/{n_features}] {INPUT_NAMES[feat_idx]}: {importance[feat_idx]:.6f}")
+            print(f"  [{feat_idx+1}/{n_features}] {feat_names[feat_idx]}: {importance[feat_idx]:.6f}")
         return importance, baseline_mse
 
 
@@ -171,7 +219,8 @@ def print_ranked(title, names, scores, groups=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Feature importance analysis for BC policy")
-    parser.add_argument("--checkpoint", type=str, default="bc_policy_100.pt")
+    parser.add_argument("--checkpoint", "--policy", type=str, default="bc_policy_100.pt",
+                        help="Path to trained .pt checkpoint")
     parser.add_argument("--data", type=str, required=True, help="Path to .npz dataset")
     parser.add_argument("--n_samples", type=int, default=10000,
                         help="Number of val samples to use (default: 10000)")
@@ -192,7 +241,7 @@ def main():
         device = "cpu"
 
     # Load model
-    model, mean, std = load_policy(args.checkpoint, device=device)
+    model, mean, std, _, _, _ = load_policy(args.checkpoint, device=device)
     print(f"Loaded policy from {args.checkpoint}  device={device}")
 
     # Load data and get val split
@@ -209,6 +258,10 @@ def main():
         y_val = y_val[idxs]
         print(f"Subsampled to {args.n_samples} samples for analysis")
 
+    n_features = X_val.shape[1]
+    input_names, feature_groups = get_names_and_groups(n_features)
+    print(f"Features: {n_features}  ({', '.join(input_names[:3])}...)")
+
     # --- Permutation importance ---
     workers_str = f" ({args.num_workers} workers)" if args.num_workers > 0 else " (sequential)"
     print(f"\nRunning permutation importance...{workers_str}")
@@ -218,17 +271,17 @@ def main():
                                                  checkpoint_path=args.checkpoint)
     print(f"Baseline val MSE: {baseline:.6f}")
     print_ranked("PERMUTATION IMPORTANCE (MSE increase when feature is shuffled)",
-                 INPUT_NAMES, perm_imp, FEATURE_GROUPS)
+                 input_names, perm_imp, feature_groups)
 
     # --- Gradient saliency ---
     print("\nRunning gradient saliency...")
     saliency = gradient_saliency(model, X_val, mean, std, device, n_samples=args.n_samples)
     print_ranked("GRADIENT SALIENCY (mean |∂output/∂input|)",
-                 INPUT_NAMES, saliency, FEATURE_GROUPS)
+                 input_names, saliency, feature_groups)
 
     # --- Features that DON'T matter ---
     perm_threshold = baseline * 0.001  # less than 0.1% MSE increase
-    useless = [INPUT_NAMES[i] for i in range(37) if perm_imp[i] < perm_threshold]
+    useless = [input_names[i] for i in range(n_features) if perm_imp[i] < perm_threshold]
     print(f"\n{'=' * 65}")
     print(f"  FEATURES WITH NEGLIGIBLE IMPACT (<0.1% MSE increase):")
     if useless:
@@ -241,3 +294,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

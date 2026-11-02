@@ -19,3 +19,13 @@ Key variables in robotnik_arm_task.py:
  
  Assessment Goal:
   - ML model that produces (wheel_cmds, torque_arm) from measurements (base_pos,base_bearing,q_mes,qd_mes)
+python run_policy_sim.py --target -1 -1 0.6 --headless --base_threshold 0.75 --gravity_comp gravity_comp.pt --checkpoint
+
+  python evaluate.py --base_checkpoint 040_bc_base_gelu_e70_h512_l3_15min.pt \
+    --arm_checkpoint 041_bc_arm_gelu_e70_h512_l3_6min.pt --gravity_comp gravity_comp.pt \
+    --num_targets 20 --headless --base_threshold 0.75
+  
+
+python evaluate.py --base_checkpoint 040_bc_base_gelu_e70_h512_l3_15min.pt \
+    --arm_checkpoint 041_bc_arm_gelu_e70_h512_l3_6min.pt \
+    --num_targets 10 --headless --base_threshold 0.75

@@ -1,0 +1,91 @@
+{
+  "mode": "base",
+  "features": [
+    "heading_error",
+    "dist_to_target"
+  ],
+  "epochs": 100,
+  "num_targets": 10,
+  "parallel": 4,
+  "results": [
+    {
+      "dropped": [],
+      "label": "(none -- baseline)",
+      "checkpoint": "/Users/vishal/ros2_ws/ML-RAI/final/robotnik_arm_task/experiments/runs/base_drop_none/001_bc_base_e100_h512_l4_c1_2min.pt",
+      "best_val_loss": 0.004721,
+      "best_epoch": 18,
+      "train_time_min": 2.1,
+      "ee_mean": 0.2505,
+      "ee_median": 0.2211,
+      "pct_within_0.05m": 10.0,
+      "pct_within_0.1m": 10.0,
+      "pct_within_0.2m": 40.0,
+      "pct_within_0.5m": 100.0,
+      "pct_within_1.0m": 100.0,
+      "crashes": 0,
+      "total": 10,
+      "run_id": "base_drop_none"
+    },
+    {
+      "dropped": [
+        "heading_error"
+      ],
+      "label": "heading_error",
+      "checkpoint": "/Users/vishal/ros2_ws/ML-RAI/final/robotnik_arm_task/experiments/runs/base_drop_heading_error/001_bc_base_e100_h512_l4_c1_2min.pt",
+      "best_val_loss": 0.00452,
+      "best_epoch": 20,
+      "train_time_min": 2.2,
+      "ee_mean": 0.4116,
+      "ee_median": 0.4217,
+      "pct_within_0.05m": 0.0,
+      "pct_within_0.1m": 0.0,
+      "pct_within_0.2m": 20.0,
+      "pct_within_0.5m": 70.0,
+      "pct_within_1.0m": 100.0,
+      "crashes": 0,
+      "total": 10,
+      "run_id": "base_drop_heading_error"
+    },
+    {
+      "dropped": [
+        "dist_to_target"
+      ],
+      "label": "dist_to_target",
+      "checkpoint": "/Users/vishal/ros2_ws/ML-RAI/final/robotnik_arm_task/experiments/runs/base_drop_dist_to_target/001_bc_base_e100_h512_l4_c1_2min.pt",
+      "best_val_loss": 0.004617,
+      "best_epoch": 18,
+      "train_time_min": 2.1,
+      "ee_mean": 0.3605,
+      "ee_median": 0.2796,
+      "pct_within_0.05m": 0.0,
+      "pct_within_0.1m": 0.0,
+      "pct_within_0.2m": 10.0,
+      "pct_within_0.5m": 80.0,
+      "pct_within_1.0m": 100.0,
+      "crashes": 0,
+      "total": 10,
+      "run_id": "base_drop_dist_to_target"
+    },
+    {
+      "dropped": [
+        "heading_error",
+        "dist_to_target"
+      ],
+      "label": "heading_error+dist_to_target",
+      "checkpoint": "/Users/vishal/ros2_ws/ML-RAI/final/robotnik_arm_task/experiments/runs/base_drop_heading_error_dist_to_target/001_bc_base_e100_h512_l4_c1_2min.pt",
+      "best_val_loss": 0.004389,
+      "best_epoch": 21,
+      "train_time_min": 2.1,
+      "ee_mean": 0.7305,
+      "ee_median": 0.6229,
+      "pct_within_0.05m": 0.0,
+      "pct_within_0.1m": 0.0,
+      "pct_within_0.2m": 0.0,
+      "pct_within_0.5m": 40.0,
+      "pct_within_1.0m": 80.0,
+      "crashes": 0,
+      "total": 10,
+      "run_id": "base_drop_heading_error_dist_to_target"
+    }
+  ]
+}
