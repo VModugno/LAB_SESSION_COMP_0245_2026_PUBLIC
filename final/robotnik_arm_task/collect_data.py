@@ -20,6 +20,9 @@ from robotnik_arm_task import (
     setup_simulation,
     setup_kinematics,
     run_simulation_loop,
+    run_pick_and_place_loop,
+    run_sequential_pick_and_place_loop,
+    DROP_ZONE_DEFAULT,
 )
 from robotnik_arm_control import configure_gripper_fingers
 
@@ -103,6 +106,57 @@ def run_single_trajectory(sim, client, rid, dyn_model, ee_frame_id,
         return data
     except Exception as e:
         print(f"  [WARN] Trajectory failed for target {target_ee_pos}: {e}")
+        return None
+
+
+def run_pick_and_place_trajectory(sim, client, rid, dyn_model, ee_frame_id,
+                                   shoulder_frame_id, init_joint_angles,
+                                   lower_limits, upper_limits,
+                                   ball_positions, drop_zone=None,
+                                   vary_init=False, rng=None,
+                                   torque_noise_factory=None,
+                                   per_target_timeout=None,
+                                   sequential=False):
+    """Reset the sim and run one pick-and-place episode for multiple balls.
+
+    If *sequential* is True, uses the chain mode (pick at ball_i, drop at ball_{i+1}).
+    Returns (combined_data, selector_samples, per_ball_results) or None on failure.
+    """
+    if drop_zone is None:
+        drop_zone = DROP_ZONE_DEFAULT.copy()
+
+    sim.ResetPose()
+
+    if vary_init and rng is not None:
+        base_pos = list(sim.GetBasePosition())
+        base_ori = list(sim.GetBaseOrientation())
+        base_pos[0] += rng.uniform(-0.3, 0.3)
+        base_pos[1] += rng.uniform(-0.3, 0.3)
+        import pybullet as p
+        yaw_perturb = rng.uniform(-0.1, 0.1)
+        new_ori = p.getQuaternionFromEuler([0, 0, yaw_perturb])
+        client.resetBasePositionAndOrientation(
+            sim.bot[0].bot_pybullet, base_pos, new_ori,
+        )
+
+    target_finger_angles = configure_gripper_fingers(sim, client, rid, FIXED_FINGER_ANGLES)
+    init_joint_angles_now = np.array(sim.GetMotorAngles(0))
+
+    loop_fn = run_sequential_pick_and_place_loop if sequential else run_pick_and_place_loop
+
+    try:
+        combined_data, selector_samples, per_ball_results = loop_fn(
+            sim, dyn_model, ee_frame_id, shoulder_frame_id,
+            init_joint_angles_now, target_finger_angles,
+            lower_limits, upper_limits,
+            target_ee_positions=ball_positions,
+            drop_zone=drop_zone,
+            torque_noise_factory=torque_noise_factory,
+            per_target_timeout=per_target_timeout,
+        )
+        return combined_data, selector_samples, per_ball_results
+    except Exception as e:
+        print(f"  [WARN] Pick-and-place episode failed: {e}")
         return None
 
 
@@ -362,6 +416,16 @@ def main():
                         help="Fraction of trajectories collected without noise (default: 0.25)")
     parser.add_argument("--hold_time", type=float, default=2.0,
                         help="Seconds to keep recording after the target is first reached (default: 2)")
+    # Pick-and-place mode
+    parser.add_argument("--pick_and_place", action="store_true",
+                        help="Collect pick-and-place episodes instead of single-target reach")
+    parser.add_argument("--drop_zone", type=float, nargs=3, default=None,
+                        metavar=("X", "Y", "Z"),
+                        help="Drop zone position for pick-and-place (default: 0.0 0.0 0.5)")
+    parser.add_argument("--num_balls_per_episode", type=int, default=3,
+                        help="Number of balls per pick-and-place episode (default: 3)")
+    parser.add_argument("--sequential", action="store_true",
+                        help="Sequential pick-and-place: pick ball_i, carry to ball_{i+1}")
     args = parser.parse_args()
 
     noise_params = None
@@ -375,6 +439,73 @@ def main():
         targets = generate_grid_targets(n=args.num_targets)
     else:
         targets = generate_random_targets(n=args.num_targets, seed=args.seed)
+
+    # --- Pick-and-place mode ---
+    if args.pick_and_place:
+        drop_zone = np.array(args.drop_zone) if args.drop_zone else DROP_ZONE_DEFAULT.copy()
+        n_balls = args.num_balls_per_episode
+        # num_targets controls the number of episodes
+        n_episodes = args.num_targets
+
+        print(f"Collecting {n_episodes} pick-and-place episodes "
+              f"({n_balls} balls each, drop_zone={drop_zone})")
+
+        sim, client, rid, conf_file_name, cur_dir = setup_simulation()
+        dyn_model, ee_frame_id, shoulder_frame_id, init_joint_angles, _, \
+            lower_limits, upper_limits = setup_kinematics(sim, conf_file_name, cur_dir)
+
+        rng = np.random.default_rng(args.seed)
+        noise_rng = np.random.default_rng(args.seed + 1000)
+
+        all_data = []
+        chunk_paths = []
+        chunk_idx = 0
+        for ep in range(n_episodes):
+            # Generate random ball positions for this episode
+            ball_positions = [
+                np.array([rng.uniform(-5, 5), rng.uniform(-5, 5), rng.uniform(0.2, 1.0)])
+                for _ in range(n_balls)
+            ]
+            tnf = (lambda: make_torque_noise(noise_params, args.clean_frac, noise_rng)) if noise_params else None
+            print(f"\n[Episode {ep+1}/{n_episodes}] Balls: {[np.round(b, 2).tolist() for b in ball_positions]}")
+
+            result = run_pick_and_place_trajectory(
+                sim, client, rid, dyn_model, ee_frame_id, shoulder_frame_id,
+                init_joint_angles, lower_limits, upper_limits,
+                ball_positions=ball_positions, drop_zone=drop_zone,
+                vary_init=args.vary_init, rng=rng,
+                torque_noise_factory=tnf,
+                sequential=args.sequential,
+            )
+            if result is not None:
+                combined_data, selector_samples, per_ball_results = result
+                if "time" in combined_data and len(combined_data["time"]) > 0:
+                    all_data.append(combined_data)
+                    n_gripped = sum(1 for r in per_ball_results if r["gripped"])
+                    n_delivered = sum(1 for r in per_ball_results if r["delivered"])
+                    print(f"  Steps: {len(combined_data['time'])}  "
+                          f"Gripped: {n_gripped}/{n_balls}  Delivered: {n_delivered}/{n_balls}")
+
+            if len(all_data) >= args.flush_every:
+                path = flush_chunk(all_data, args.out_dir, chunk_idx)
+                if path:
+                    chunk_paths.append(path)
+                    chunk_idx += 1
+                all_data = []
+
+        if all_data:
+            path = flush_chunk(all_data, args.out_dir, chunk_idx)
+            if path:
+                chunk_paths.append(path)
+
+        if not chunk_paths:
+            print("No data collected. Exiting.")
+            sys.exit(1)
+
+        print(f"\nMerging {len(chunk_paths)} chunks into final dataset...")
+        merge_chunks(chunk_paths, args.out_dir)
+        print("Done.")
+        return
 
     print(f"Collecting {len(targets)} trajectories (mode={args.mode}, vary_init={args.vary_init}, "
           f"workers={args.workers})")
